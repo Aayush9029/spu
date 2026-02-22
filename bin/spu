@@ -103,12 +103,14 @@ show_help() {
     echo -e "    -v, --version      Show version"
     echo -e "    -c, --check        Show table only, don't prompt"
     echo -e "    -a, --all          Recursively find and update all"
+    echo -e "    -l, --level N      Scan depth for recursive search (default: 3)"
     echo
     echo -e "${BLUE}EXAMPLES${RESET}"
-    echo -e "    ${DIM}spu${RESET}                   ${DIM}# current directory${RESET}"
+    echo -e "    ${DIM}spu${RESET}                   ${DIM}# current directory (scans recursively if no Package.swift)${RESET}"
     echo -e "    ${DIM}spu ~/project${RESET}          ${DIM}# specific path${RESET}"
     echo -e "    ${DIM}spu --check${RESET}            ${DIM}# read-only${RESET}"
     echo -e "    ${DIM}spu --all${RESET}              ${DIM}# update everything${RESET}"
+    echo -e "    ${DIM}spu --all -l 5${RESET}         ${DIM}# deeper scan${RESET}"
     echo
     exit 0
 }
@@ -287,6 +289,7 @@ process_package_swift() {
 TARGET_PATH=""
 CHECK_ONLY=false
 ALL_MODE=false
+LEVEL=3
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -304,6 +307,10 @@ while [[ $# -gt 0 ]]; do
             ALL_MODE=true
             shift
             ;;
+        -l|--level)
+            LEVEL="$2"
+            shift 2
+            ;;
         -*)
             print_error "Unknown option: $1"
             echo -e "${DIM}Use 'spu --help' for usage${RESET}"
@@ -316,6 +323,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+#***** find Package.swift files with depth limit *****
+find_packages() {
+    find . -maxdepth "$LEVEL" -name "Package.swift" \
+        -not -path "*/.*" \
+        -not -path "*/Build/*" \
+        -not -path "*/build/*" \
+        -not -path "*/DerivedData/*" \
+        -not -path "*/Pods/*" \
+        2>/dev/null | sort
+}
+
 #***** main *****
 echo
 print_header
@@ -326,7 +344,7 @@ if [[ "$ALL_MODE" == true ]]; then
     all_packages=()
     while IFS= read -r pkg; do
         all_packages+=("$pkg")
-    done < <(find . -name "Package.swift" -not -path "*/.*" -not -path "*/Build/*" -not -path "*/build/*" -not -path "*/DerivedData/*" -not -path "*/Pods/*" 2>/dev/null | sort)
+    done < <(find_packages)
 
     if [[ ${#all_packages[@]} -eq 0 ]]; then
         print_error "No Package.swift files found"
@@ -356,9 +374,30 @@ else
         if [[ -f "Package.swift" ]]; then
             PACKAGE_SWIFT="Package.swift"
         else
-            print_error "No Package.swift in current directory"
-            echo -e "${DIM}Usage: spu [path]${RESET}"
-            exit 1
+            # No Package.swift here — scan recursively
+            all_packages=()
+            while IFS= read -r pkg; do
+                all_packages+=("$pkg")
+            done < <(find_packages)
+
+            if [[ ${#all_packages[@]} -eq 0 ]]; then
+                print_error "No Package.swift found (depth $LEVEL)"
+                echo -e "${DIM}Try: spu -l 5${RESET}"
+                exit 1
+            fi
+
+            print_status "Found ${BOLD}${#all_packages[@]}${RESET} Package.swift file(s) (depth $LEVEL)"
+            echo
+
+            check_flag=""
+            [[ "$CHECK_ONLY" == true ]] && check_flag="true"
+
+            for pkg_file in "${all_packages[@]}"; do
+                echo -e "${CYAN}${BOLD}━━━ $pkg_file ━━━${RESET}"
+                process_package_swift "$pkg_file" "" "$check_flag"
+                echo
+            done
+            exit 0
         fi
     fi
 
