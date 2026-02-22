@@ -1,0 +1,370 @@
+#!/bin/bash
+#***************************************************************************
+#*** spu - swift package update checker
+#***************************************************************************
+
+VERSION="0.1.0"
+
+#***** color scheme *****
+GREEN='\033[1;32m'
+RED='\033[1;31m'
+YELLOW='\033[1;33m'
+CYAN='\033[1;36m'
+BLUE='\033[1;34m'
+DIM='\033[2m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+#***** helper functions *****
+print_header() {
+    echo -e "${CYAN}${BOLD}⚡ spu${RESET}"
+}
+
+print_success() {
+    echo -e "${GREEN}✓${RESET} $1"
+}
+
+print_error() {
+    echo -e "${RED}✗${RESET} $1"
+}
+
+print_status() {
+    echo -e "  ${GREEN}→${RESET} $1"
+}
+
+print_dim() {
+    echo -e "  ${DIM}$1${RESET}"
+}
+
+#***** cache (parallel arrays, bash 3.2 compat) *****
+CACHE_KEYS=()
+CACHE_VALUES=()
+
+cache_get() {
+    local key="$1" i
+    for i in "${!CACHE_KEYS[@]}"; do
+        if [[ "${CACHE_KEYS[$i]}" == "$key" ]]; then
+            echo "${CACHE_VALUES[$i]}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+cache_set() {
+    CACHE_KEYS+=("$1")
+    CACHE_VALUES+=("$2")
+}
+
+#***** fetch latest version (runs in background, writes to tmpfile) *****
+fetch_latest_version() {
+    local repo="$1"
+    local slug="${repo//\//_}"
+    local tmpfile="/tmp/spu_${slug}"
+    local tag=""
+    local json
+
+    # Try releases/latest first
+    json=$(curl -sf "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null)
+    if [[ -n "$json" ]]; then
+        tag=$(echo "$json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('tag_name',''))" 2>/dev/null)
+    fi
+
+    # Fallback to tags
+    if [[ -z "$tag" || "$tag" == "None" ]]; then
+        json=$(curl -sf "https://api.github.com/repos/${repo}/tags?per_page=1" 2>/dev/null)
+        if [[ -n "$json" ]]; then
+            tag=$(echo "$json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['name'] if d else '')" 2>/dev/null)
+        fi
+    fi
+
+    # Strip leading 'v', validate
+    tag="${tag#v}"
+    if [[ -z "$tag" || "$tag" == "None" || "$tag" == "null" ]]; then
+        tag="unknown"
+    fi
+
+    echo "$tag" > "$tmpfile"
+}
+
+#***** show help *****
+show_help() {
+    echo
+    print_header
+    echo -e "  ${DIM}check & update swift package dependencies${RESET}"
+    echo
+    echo -e "${BLUE}USAGE${RESET}"
+    echo -e "    spu [path]              ${DIM}# check + interactive update${RESET}"
+    echo -e "    spu [path] --check      ${DIM}# show table only${RESET}"
+    echo -e "    spu --all               ${DIM}# find & auto-update all${RESET}"
+    echo
+    echo -e "${BLUE}OPTIONS${RESET}"
+    echo -e "    -h, --help         Show this help"
+    echo -e "    -v, --version      Show version"
+    echo -e "    -c, --check        Show table only, don't prompt"
+    echo -e "    -a, --all          Recursively find and update all"
+    echo
+    echo -e "${BLUE}EXAMPLES${RESET}"
+    echo -e "    ${DIM}spu${RESET}                   ${DIM}# current directory${RESET}"
+    echo -e "    ${DIM}spu ~/project${RESET}          ${DIM}# specific path${RESET}"
+    echo -e "    ${DIM}spu --check${RESET}            ${DIM}# read-only${RESET}"
+    echo -e "    ${DIM}spu --all${RESET}              ${DIM}# update everything${RESET}"
+    echo
+    exit 0
+}
+
+#***** show version *****
+show_version() {
+    echo "spu $VERSION"
+    exit 0
+}
+
+#***** process a single Package.swift *****
+process_package_swift() {
+    local pkg_file="$1"
+    local auto_update="$2"
+    local check_only="$3"
+
+    local repos=()
+    local current_versions=()
+    local package_names=()
+    local regex='\.package\(url: *"https://github\.com/([^"]+)".*from: *"([^"]+)"'
+
+    while IFS= read -r line; do
+        local trimmed="${line#"${line%%[![:space:]]*}"}"
+        [[ "$trimmed" == //* ]] && continue
+        if [[ $line =~ $regex ]]; then
+            local repo="${BASH_REMATCH[1]}"
+            repo="${repo%.git}"
+            repos+=("$repo")
+            current_versions+=("${BASH_REMATCH[2]}")
+            package_names+=("${repo##*/}")
+        fi
+    done < "$pkg_file"
+
+    if [[ ${#repos[@]} -eq 0 ]]; then
+        echo -e "  ${YELLOW}No GitHub dependencies found${RESET}"
+        return 0
+    fi
+
+    # Deduplicate: find repos not yet cached
+    local unique_repos=()
+    local repo already u
+    for repo in "${repos[@]}"; do
+        if ! cache_get "$repo" >/dev/null 2>&1; then
+            already=false
+            for u in "${unique_repos[@]}"; do
+                [[ "$u" == "$repo" ]] && { already=true; break; }
+            done
+            [[ "$already" == false ]] && unique_repos+=("$repo")
+        fi
+    done
+
+    # Parallel fetch uncached repos
+    if [[ ${#unique_repos[@]} -gt 0 ]]; then
+        print_dim "Fetching ${#unique_repos[@]} repo(s)..."
+        for repo in "${unique_repos[@]}"; do
+            fetch_latest_version "$repo" &
+        done
+        wait
+
+        for repo in "${unique_repos[@]}"; do
+            local slug="${repo//\//_}"
+            local tmpfile="/tmp/spu_${slug}"
+            if [[ -f "$tmpfile" ]]; then
+                cache_set "$repo" "$(cat "$tmpfile")"
+                rm -f "$tmpfile"
+            else
+                cache_set "$repo" "unknown"
+            fi
+        done
+    fi
+
+    # Build latest_versions from cache
+    local latest_versions=()
+    local needs_update=()
+    local i latest
+    for i in "${!repos[@]}"; do
+        latest=$(cache_get "${repos[$i]}")
+        latest_versions+=("$latest")
+        if [[ "${current_versions[$i]}" != "$latest" && "$latest" != "unknown" ]]; then
+            needs_update+=("$i")
+        fi
+    done
+
+    # Print table
+    echo
+    if [[ -t 1 ]]; then
+        printf "${BOLD}%-4s %-35s %-12s %-12s %s${RESET}\n" "#" "Package" "Current" "Latest" "Status"
+    else
+        printf "%-4s %-35s %-12s %-12s %s\n" "#" "Package" "Current" "Latest" "Status"
+    fi
+    printf "%-4s %-35s %-12s %-12s %s\n" "---" "-----------------------------------" "------------" "------------" "------"
+
+    for i in "${!repos[@]}"; do
+        local idx=$((i + 1))
+        local current="${current_versions[$i]}"
+        local latest="${latest_versions[$i]}"
+        local status
+
+        if [[ "$current" == "$latest" ]]; then
+            status="${GREEN}up to date${RESET}"
+        elif [[ "$latest" == "unknown" ]]; then
+            status="${YELLOW}?${RESET}"
+        else
+            status="${YELLOW}update available${RESET}"
+        fi
+
+        if [[ "$current" != "$latest" && "$latest" != "unknown" && -t 1 ]]; then
+            printf "${YELLOW}%-4s %-35s %-12s %-12s %b${RESET}\n" "$idx" "${package_names[$i]}" "$current" "$latest" "$status"
+        else
+            printf "%-4s %-35s %-12s %-12s %b\n" "$idx" "${package_names[$i]}" "$current" "$latest" "$status"
+        fi
+    done
+    echo
+
+    if [[ ${#needs_update[@]} -eq 0 ]]; then
+        print_success "All packages are up to date!"
+        return 0
+    fi
+
+    echo -e "${CYAN}${BOLD}${#needs_update[@]} update(s) available${RESET}"
+
+    [[ "$check_only" == "true" ]] && return 0
+
+    # Prompt or auto-update
+    local selection
+    if [[ "$auto_update" == "true" ]]; then
+        selection="all"
+        print_dim "(auto mode — updating all)"
+    else
+        echo -e "Enter package numbers (space-separated), ${BOLD}all${RESET}, or ${BOLD}q${RESET}:"
+        echo -n "> "
+        read selection
+    fi
+
+    [[ "$selection" == "q" || "$selection" == "Q" ]] && { echo -e "${YELLOW}Aborted.${RESET}"; return 0; }
+
+    # Determine which to update
+    local to_update=()
+    if [[ "$selection" == "all" || "$selection" == "ALL" ]]; then
+        to_update=("${needs_update[@]}")
+    else
+        local num sel_idx
+        for num in $selection; do
+            sel_idx=$((num - 1))
+            if [[ $num -ge 1 && $num -le ${#repos[@]} ]]; then
+                if [[ "${current_versions[$sel_idx]}" != "${latest_versions[$sel_idx]}" && "${latest_versions[$sel_idx]}" != "unknown" ]]; then
+                    to_update+=("$sel_idx")
+                else
+                    echo -e "  ${YELLOW}#$num (${package_names[$sel_idx]}) already up to date${RESET}"
+                fi
+            else
+                print_error "Invalid number: $num"
+            fi
+        done
+    fi
+
+    if [[ ${#to_update[@]} -eq 0 ]]; then
+        echo -e "${YELLOW}No packages to update.${RESET}"
+        return 0
+    fi
+
+    echo
+    echo -e "${CYAN}Updating ${#to_update[@]} package(s)...${RESET}"
+
+    for i in "${to_update[@]}"; do
+        print_status "${BOLD}${package_names[$i]}${RESET}: ${current_versions[$i]} → ${latest_versions[$i]}"
+        /usr/bin/sed -i '' "s|github\.com/${repos[$i]}\(\.git\)\{0,1\}\", from: \"${current_versions[$i]}\"|github.com/${repos[$i]}\", from: \"${latest_versions[$i]}\"|g" "$pkg_file"
+    done
+
+    echo
+    print_success "Updated ${#to_update[@]} package(s)"
+    echo -e "  ${YELLOW}⏳${RESET} Run ${BOLD}swift package resolve${RESET} to apply"
+}
+
+#***** parse arguments *****
+TARGET_PATH=""
+CHECK_ONLY=false
+ALL_MODE=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            show_help
+            ;;
+        -v|--version)
+            show_version
+            ;;
+        -c|--check)
+            CHECK_ONLY=true
+            shift
+            ;;
+        -a|--all)
+            ALL_MODE=true
+            shift
+            ;;
+        -*)
+            print_error "Unknown option: $1"
+            echo -e "${DIM}Use 'spu --help' for usage${RESET}"
+            exit 1
+            ;;
+        *)
+            TARGET_PATH="$1"
+            shift
+            ;;
+    esac
+done
+
+#***** main *****
+echo
+print_header
+print_dim "v${VERSION}"
+echo
+
+if [[ "$ALL_MODE" == true ]]; then
+    all_packages=()
+    while IFS= read -r pkg; do
+        all_packages+=("$pkg")
+    done < <(find . -name "Package.swift" -not -path "*/.*" -not -path "*/Build/*" -not -path "*/build/*" -not -path "*/DerivedData/*" -not -path "*/Pods/*" 2>/dev/null | sort)
+
+    if [[ ${#all_packages[@]} -eq 0 ]]; then
+        print_error "No Package.swift files found"
+        exit 1
+    fi
+
+    print_status "Found ${BOLD}${#all_packages[@]}${RESET} Package.swift file(s)"
+    echo
+
+    for pkg_file in "${all_packages[@]}"; do
+        echo -e "${CYAN}${BOLD}━━━ $pkg_file ━━━${RESET}"
+        process_package_swift "$pkg_file" "true" ""
+        echo
+    done
+else
+    PACKAGE_SWIFT=""
+    if [[ -n "$TARGET_PATH" ]]; then
+        if [[ -f "$TARGET_PATH" ]]; then
+            PACKAGE_SWIFT="$TARGET_PATH"
+        elif [[ -f "$TARGET_PATH/Package.swift" ]]; then
+            PACKAGE_SWIFT="$TARGET_PATH/Package.swift"
+        else
+            print_error "Package.swift not found at $TARGET_PATH"
+            exit 1
+        fi
+    else
+        if [[ -f "Package.swift" ]]; then
+            PACKAGE_SWIFT="Package.swift"
+        else
+            print_error "No Package.swift in current directory"
+            echo -e "${DIM}Usage: spu [path]${RESET}"
+            exit 1
+        fi
+    fi
+
+    print_status "Using ${BOLD}$PACKAGE_SWIFT${RESET}"
+
+    check_flag=""
+    [[ "$CHECK_ONLY" == true ]] && check_flag="true"
+    process_package_swift "$PACKAGE_SWIFT" "" "$check_flag"
+fi
