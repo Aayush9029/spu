@@ -3,7 +3,7 @@
 #*** spu - swift package update checker
 #***************************************************************************
 
-VERSION="0.2.0"
+VERSION="0.2.1"
 
 #***** color scheme *****
 GREEN='\033[1;32m'
@@ -87,7 +87,14 @@ fetch_latest_version() {
     # Try releases/latest first (already filters out prereleases & drafts)
     json=$(gh_api "/repos/${repo}/releases/latest")
     if [[ -n "$json" ]]; then
-        tag=$(echo "$json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('tag_name',''))" 2>/dev/null)
+        tag=$(echo "$json" | python3 -c "
+import sys, json, re
+t = json.load(sys.stdin).get('tag_name', '')
+if re.match(r'^v?\d+\.\d+\.\d+$', t):
+    print(t)
+else:
+    print('')
+" 2>/dev/null)
     fi
 
     # Fallback: fetch recent releases and find first stable one
@@ -133,16 +140,6 @@ if best:
 else:
     print('')
 " 2>/dev/null)
-        fi
-    fi
-
-    # Final fallback: default branch
-    if [[ -z "$tag" || "$tag" == "None" ]]; then
-        json=$(gh_api "/repos/${repo}")
-        if [[ -n "$json" ]]; then
-            tag=$(echo "$json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('default_branch','main'))" 2>/dev/null)
-        else
-            tag="main"
         fi
     fi
 
