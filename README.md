@@ -1,3 +1,5 @@
+<img src="assets/icon.png" width="128" alt="spu">
+
 # spu
 
 Check and update Swift package dependencies from the command line.
