@@ -1,15 +1,29 @@
-<img src="assets/icon.png" width="128" alt="spu">
+<p align="center">
+  <img src="assets/icon.png" width="128" alt="spu">
+  <h1 align="center">spu</h1>
+  <p align="center">Check and update Swift package dependencies from the command line</p>
+</p>
 
-# spu
+<p align="center">
+  <a href="https://github.com/Aayush9029/spu/releases/latest"><img src="https://img.shields.io/github/v/release/Aayush9029/spu" alt="Release"></a>
+  <a href="https://github.com/Aayush9029/spu/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Aayush9029/spu" alt="License"></a>
+</p>
 
-Check and update Swift package dependencies from the command line.
-
-<p align="center"><img src="assets/demo.gif" alt="spu demo" width="800"></p>
+<p align="center">
+  <img src="assets/demo.gif" alt="spu demo" width="800">
+</p>
 
 ## Install
 
 ```bash
 brew install aayush9029/tap/spu
+```
+
+Or tap first:
+
+```bash
+brew tap aayush9029/tap
+brew install spu
 ```
 
 ## Usage
@@ -28,6 +42,6 @@ spu --all               # find & auto-update all Package.swift files
 3. Displays a version comparison table with update status
 4. Prompts to select packages to update (or auto-updates with `--all`)
 
----
+## License
 
-*More CLI tools: [`brew tap aayush9029/tap`](https://github.com/Aayush9029/homebrew-tap)*
+MIT
