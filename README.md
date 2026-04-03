@@ -4,6 +4,8 @@
 
 Check and update Swift package dependencies from the command line.
 
+<p align="center"><img src="assets/demo.gif" alt="spu demo" width="800"></p>
+
 ## Install
 
 ```bash
