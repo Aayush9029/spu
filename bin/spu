@@ -3,7 +3,7 @@
 #*** spu - swift package update checker
 #***************************************************************************
 
-VERSION="0.2.1"
+VERSION="0.2.2"
 
 #***** color scheme *****
 GREEN='\033[1;32m'
@@ -34,6 +34,23 @@ print_status() {
 
 print_dim() {
     echo -e "  ${DIM}$1${RESET}"
+}
+
+#***** semver comparison (bash 3.2 compat) *****
+# returns 0 if v1 > v2, 1 otherwise. Non-semver inputs fall back to string compare.
+version_gt() {
+    local v1="${1#v}" v2="${2#v}"
+    local re='^[0-9]+\.[0-9]+\.[0-9]+$'
+    if [[ ! "$v1" =~ $re || ! "$v2" =~ $re ]]; then
+        [[ "$v1" > "$v2" ]] && return 0 || return 1
+    fi
+    local a1 a2 a3 b1 b2 b3
+    IFS='.' read -r a1 a2 a3 <<< "$v1"
+    IFS='.' read -r b1 b2 b3 <<< "$v2"
+    if (( 10#$a1 != 10#$b1 )); then (( 10#$a1 > 10#$b1 )); return $?; fi
+    if (( 10#$a2 != 10#$b2 )); then (( 10#$a2 > 10#$b2 )); return $?; fi
+    if (( 10#$a3 != 10#$b3 )); then (( 10#$a3 > 10#$b3 )); return $?; fi
+    return 1
 }
 
 #***** cache (parallel arrays, bash 3.2 compat) *****
@@ -266,7 +283,9 @@ process_package_swift() {
         latest=$(cache_get "${repos[$i]}")
         latest_versions+=("$latest")
         if [[ "${current_versions[$i]}" != "$latest" && "$latest" != "unknown" ]]; then
-            needs_update+=("$i")
+            if ! version_gt "${current_versions[$i]}" "$latest"; then
+                needs_update+=("$i")
+            fi
         fi
     done
 
@@ -284,16 +303,20 @@ process_package_swift() {
         local current="${current_versions[$i]}"
         local latest="${latest_versions[$i]}"
         local status
+        local behind=false
 
         if [[ "$current" == "$latest" ]]; then
             status="${GREEN}up to date${RESET}"
         elif [[ "$latest" == "unknown" ]]; then
             status="${YELLOW}?${RESET}"
+        elif version_gt "$current" "$latest"; then
+            status="${BLUE}ahead${RESET}"
         else
             status="${YELLOW}update available${RESET}"
+            behind=true
         fi
 
-        if [[ "$current" != "$latest" && "$latest" != "unknown" && -t 1 ]]; then
+        if [[ "$behind" == true && -t 1 ]]; then
             printf "${YELLOW}%-4s %-35s %-12s %-12s %b${RESET}\n" "$idx" "${package_names[$i]}" "$current" "$latest" "$status"
         else
             printf "%-4s %-35s %-12s %-12s %b\n" "$idx" "${package_names[$i]}" "$current" "$latest" "$status"
@@ -328,11 +351,15 @@ process_package_swift() {
     if [[ "$selection" == "all" || "$selection" == "ALL" ]]; then
         to_update=("${needs_update[@]}")
     else
-        local num sel_idx
+        local num sel_idx in_needs
         for num in $selection; do
             sel_idx=$((num - 1))
             if [[ $num -ge 1 && $num -le ${#repos[@]} ]]; then
-                if [[ "${current_versions[$sel_idx]}" != "${latest_versions[$sel_idx]}" && "${latest_versions[$sel_idx]}" != "unknown" ]]; then
+                in_needs=false
+                for n in "${needs_update[@]}"; do
+                    [[ "$n" == "$sel_idx" ]] && { in_needs=true; break; }
+                done
+                if [[ "$in_needs" == true ]]; then
                     to_update+=("$sel_idx")
                 else
                     echo -e "  ${YELLOW}#$num (${package_names[$sel_idx]}) already up to date${RESET}"
